@@ -1,0 +1,31 @@
+import os
+import sqlite3
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import pandas as pd
+import numpy as np
+import requests
+
+
+
+def get_db_connection():
+    data = sqlite3.connect("route_all.db")
+    return data
+
+def get_route(data, route):
+    df = pd.read_sql_query(
+            "SELECT route, trip_id, stop_position, stop_id, scheduled_departure_sec, "
+            "delay_seconds, is_realtime FROM stoptimes "
+            f"WHERE route = '{route}' "
+            "ORDER BY service_date, route, trip_id, stop_position", data)
+    return df
+
+def main():
+    conn = get_db_connection()
+    rows = get_route(conn, "40")
+    print(rows)
+    conn.close()
+
+if __name__ == "__main__":
+    main()
