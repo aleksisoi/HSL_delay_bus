@@ -20,7 +20,7 @@ DURATION_SECONDS = 60 * 15  # total run time
 POLL_INTERVAL_SECONDS = 60 * 5  # minimum time between full sweeps of all routes
 REQUEST_DELAY_SECONDS = 0.5     # pause between API calls to stay under the rate limit
 
-ONLY_DEPARTED = False #Set True to only get realtime data, if True DOES NOT POLL YESTERDAYS DATA
+ONLY_DEPARTED = False #Set True to only get realtime data
 
 TZ = ZoneInfo("Europe/Helsinki")
 

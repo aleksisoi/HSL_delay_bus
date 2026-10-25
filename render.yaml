@@ -1,0 +1,12 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: hsl-delay-game
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 64 --bind 0.0.0.0:$PORT game_server:app
+    healthCheckPath: /
+    envVars:
+      - key: DIGITRANSIT_KEY
+        sync: false   

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Guess the HSL delay</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+*{box-sizing:border-box}html,body{height:100%;margin:0;font:14px system-ui,sans-serif;color:#12202b}
+#app{display:grid;grid-template-columns:360px 1fr;height:100%}
+#side{overflow:auto;padding:14px;border-right:1px solid #dbe2e8;background:#f7f9fb}
+#map{height:100%}h1{font-size:18px;margin:0 0 10px}h2{font-size:13px;margin:16px 0 6px;text-transform:uppercase;color:#5d6c78}
+input,button{font:inherit;padding:7px 9px;border:1px solid #dbe2e8;border-radius:7px;background:#fff}
+input[type=text]{width:100%}button{cursor:pointer}button.primary{background:#007ac9;color:#fff;border-color:#007ac9;width:100%;margin-top:8px}
+#tt{max-height:210px;overflow:auto;display:grid;gap:4px}
+.t{display:flex;justify-content:space-between;text-align:left}.t.past{color:#8a97a2;cursor:default}.t.sel{border-color:#007ac9;box-shadow:inset 3px 0 #007ac9}
+.row{padding:7px 0;border-bottom:1px solid #e6ebef;font-size:13px}.win{color:#1fa463;font-weight:600}
+#toast{position:fixed;right:16px;top:16px;z-index:9999;display:grid;gap:8px}
+.toast{background:#12202b;color:#fff;padding:10px 14px;border-radius:8px;max-width:320px;box-shadow:0 4px 16px #0004}
+@media(max-width:700px){#app{grid-template-columns:1fr;grid-template-rows:45% 55%}#map{order:-1}}
+</style></head><body>
+<div id="toast"></div>
+<div id="app"><div id="side">
+<h1>Guess the HSL delay</h1>
+<h2>1. Route</h2><input type="text" id="route" list="routes" placeholder="Bus line, e.g. 55" autocomplete="off"><datalist id="routes"></datalist>
+<h2>2. Stop <span id="stopname" style="text-transform:none"></span></h2><div id="hint">Click a stop on the map.</div>
+<div id="tt"></div>
+<div id="guessbox" hidden><h2>3. Your guess</h2>
+<div id="picked"></div>
+<input type="range" id="g" min="-120" max="900" step="10" value="60" style="width:100%">
+<div><b id="gv">+60 s</b> <span style="color:#5d6c78">(negative = early)</span></div>
+<input type="text" id="player" placeholder="Your name" style="margin-top:8px">
+<button class="primary" id="go">Lock in guess</button></div>
+<h2>Scoreboard</h2><div id="stats"></div><div id="feed"></div>
+</div><div id="map"></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="/config.js"></script>
+<script>
+const $=id=>document.getElementById(id), fmt=e=>new Date(e*1000).toLocaleTimeString("fi-FI",{hour:"2-digit",minute:"2-digit"});
+const sgn=s=>(s>0?"+":"")+Math.round(s)+" s";
+const map=L.map("map").setView([60.17,24.94],11);
+const k=window.DIGITRANSIT_KEY;
+L.tileLayer(k?`https://cdn.digitransit.fi/map/v3/hsl-map/{z}/{x}/{y}{r}.png?digitransit-subscription-key=${k}`:"https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",{maxZoom:19,subdomains:"abcd",attribution:"&copy; OpenStreetMap contributors | Digitransit, CARTO"}).addTo(map);
+const layer=L.layerGroup().addTo(map);let RS=[],cur=null,stop=null,tt=null,pick=null,markers={};
+function decode(s){let i=0,la=0,ln=0,o=[];while(i<s.length){let b,sh=0,r=0;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);la+=r&1?~(r>>1):r>>1;sh=0;r=0;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);ln+=r&1?~(r>>1):r>>1;o.push([la/1e5,ln/1e5])}return o}
+fetch("/api/routes").then(r=>r.json()).then(rs=>{RS=rs;$("routes").innerHTML=rs.map(r=>`<option value="${r.shortName}">${r.longName||""}</option>`).join("")});
+$("player").value=localStorage.player||"";
+$("route").onchange=async e=>{
+  const r=RS.find(x=>x.shortName.toUpperCase()===e.target.value.trim().toUpperCase());if(!r)return;
+  const d=await (await fetch("/api/route/"+encodeURIComponent(r.gtfsId))).json();
+  cur={id:r.gtfsId,name:r.shortName};layer.clearLayers();markers={};stop=null;$("tt").innerHTML="";$("guessbox").hidden=true;$("stopname").textContent="";
+  const all=[];d.patterns.forEach(p=>{const pts=decode(p.patternGeometry.points);all.push(...pts);L.polyline(pts,{color:"#007ac9",weight:5,opacity:.8}).addTo(layer)});
+  const seen={};d.patterns.forEach(p=>p.stops.forEach(s=>{if(seen[s.gtfsId])return;seen[s.gtfsId]=1;
+    markers[s.gtfsId]=L.circleMarker([s.lat,s.lon],{radius:6,color:"#fff",weight:2,fillColor:"#ff6319",fillOpacity:1}).bindTooltip(s.name).on("click",()=>selectStop(s)).addTo(layer)}));
+  map.fitBounds(all);$("hint").textContent="Click a stop on the map."};
+async function selectStop(s){
+  stop=s;$("stopname").textContent="· "+s.name;$("hint").textContent="";
+  Object.entries(markers).forEach(([id,m])=>m.setStyle({fillColor:id===s.gtfsId?"#12202b":"#ff6319",radius:id===s.gtfsId?9:6}));
+  tt=await (await fetch(`/api/timetable?route=${encodeURIComponent(cur.id)}&stop=${encodeURIComponent(s.gtfsId)}`)).json();
+  $("tt").innerHTML="";pick=null;$("guessbox").hidden=true;
+  if(!tt.times.length)$("hint").textContent="No departures from this stop today.";
+  tt.times.forEach(t=>{const b=document.createElement("button");b.className="t"+(t.past?" past":"");
+    b.innerHTML=`<span>${fmt(t.epoch)} ${t.headsign||""}</span><span>${t.past&&t.delay!=null?sgn(t.delay):""}</span>`;
+    if(!t.past)b.onclick=()=>{pick=t;document.querySelectorAll(".t").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");
+      $("picked").textContent=`Route ${cur.name} at ${s.name}, ${fmt(t.epoch)}`;$("guessbox").hidden=false};
+    $("tt").appendChild(b)})}
+$("g").oninput=()=>$("gv").textContent=sgn(+$("g").value);
+$("go").onclick=async()=>{if(!pick)return;localStorage.player=$("player").value;
+  const r=await (await fetch("/api/guess",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+    player:$("player").value||"anon",route:cur.name,route_id:cur.id,stop_id:stop.gtfsId,stop_name:stop.name,trip_id:pick.trip,
+    service_date:tt.date,sched_epoch:pick.epoch,sched_sec:pick.sched_sec,position:pick.position,human:+$("g").value})})).json();
+  toast(`Guess saved. The model guessed ${sgn(r.model)}. You'll be told when the result is in.`)};
+function toast(m){const d=document.createElement("div");d.className="toast";d.textContent=m;$("toast").appendChild(d);setTimeout(()=>d.remove(),9000)}
+async function refresh(){const d=await (await fetch("/api/guesses")).json(),s=d.stats;
+  $("stats").innerHTML=s.resolved?`${s.resolved} results. Avg error: you <b>${s.human_mae} s</b>, model <b>${s.model_mae} s</b>. Wins: you ${s.human_wins}, model ${s.model_wins}`:"No results yet.";
+  $("feed").innerHTML=d.rows.map(r=>`<div class="row"><b>${r.route}</b> ${r.stop_name} ${fmt(r.sched_epoch)} · ${r.player}<br>
+    you ${sgn(r.human)} · model ${sgn(r.model)} · ${r.status==="done"?"actual <b>"+sgn(r.actual)+"</b>":r.status==="expired"?"no result":"waiting"}</div>`).join("")}
+const es=new EventSource("/api/events");
+es.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="result")toast(`Result: ${m.route} at ${m.stop} ${fmt(m.time)} was ${sgn(m.actual)}. ${m.player} guessed ${sgn(m.human)}, model ${sgn(m.model)}. Winner: ${m.winner}.`);refresh()};
+refresh();
+</script></body></html>
