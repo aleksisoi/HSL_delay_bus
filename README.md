@@ -1,25 +1,19 @@
-dataset comes in 2 formats; .db and .csv. Files to be downloaded at: 
-use routefinder to query single route, in future possibly other parameters. Preferred file for operations .db
+https://hsl-delay-game.onrender.com/ to launch the browser game. Due to page limitations first visitors every 15 minutes need to wait for the page to be redeployed and models loaded. 
+To run locally download game_server.py, static folder with index inside, 2 joblib files which are the models, start with `python game_server.py` (needs `DIGITRANSIT_KEY` in `.env` at the current moment). 
+HSLroutesFINAL.py can be used to query routes, needs DIGITRANSIT_KEY.
+query_route can be used to slice and view data.
+Latest dataset is in releases. 
 
-TO BE DONE:  active routes per hour, heatmap of average delay per stop per hour, add traffic, weekend, night parameters, make jupyter-file for routefinder
-            
+INSTRUCTIONS FOR THE GAME:
 
-## Guess the HSL delay (web game)
+Load the page and type in the route you wish to place your delay guess on. The route numbers are in the same form as they appear in HSL-app. 
+Choose a stop on the highlighted route and the departure time.
+Place your guess of delay in SECONDS. Positive for being late and negative for being ahead schedule.
+You will see how other models have estimated the delay and receive results when the bus passes said stop.
 
-`game_server.py` serves the game in `static/`. Players guess a bus's delay and compete against two models:
+Models we have trained:
+enroute_model.py, the bus is already running, 1-10 stops before the guessed stop
+delay_model.py, everything else, e.g. guesses before the trip has started
+lightgbm_model.py, additional model which we were unable to add to the game but stands in as a legacy option
 
-| Model | Used when | Test MAE (Oct 17) |
-|---|---|---|
-| `enroute_model.py` | the bus is already running, 1-10 stops before the guessed stop | 32.0 s (copying the current delay: 44.9 s) |
-| `delay_model.py` | everything else, e.g. guesses before the trip has started | 64.2 s (old mixed model: 78.3 s) |
-
-Retrain both after logging more data (needs `route_all.db`), then commit the two `.joblib` files:
-
-```bash
-python delay_model.py eval      # optional: score on the last logged day
-python delay_model.py train     # -> delay_model.joblib   (~2 min)
-python enroute_model.py eval    # optional
-python enroute_model.py train   # -> enroute_model.joblib (~5 min)
-```
-
-Run locally with `python game_server.py` (needs `DIGITRANSIT_KEY` in `.env`). Render setup is in `render.yaml`.
+Page hosted by Render
