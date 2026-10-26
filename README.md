@@ -17,4 +17,6 @@ enroute_model.py, the bus is already running, 1-10 stops before the guessed stop
 delay_model.py, everything else, e.g. guesses before the trip has started
 lightgbm_model.py, additional model which we were unable to add to the game but stands in as a legacy option
 
+
+Data: © Helsinki Region Transport (HSL), CC BY 4.0, via Digitransit. Map: © OpenStreetMap contributors (ODbL).
 Page hosted by Render
