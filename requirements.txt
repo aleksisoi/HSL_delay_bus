@@ -8,3 +8,5 @@ joblib==1.6.0
 numpy==2.2.6
 pandas==2.3.3
 scipy==1.15.3
+# Extra prediction shown in the game (lightgbm_bus_delay.joblib).
+lightgbm==4.6.0

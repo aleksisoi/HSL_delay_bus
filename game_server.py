@@ -1,5 +1,5 @@
 import json, os, queue, re, sqlite3, threading, time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -47,6 +47,12 @@ def load_model():
     MODEL["m"] = delay_model.DelayModel()
     if os.path.exists(enroute_model.MODEL_FILE):
         MODEL["en"] = enroute_model.EnrouteModel()
+    try:  # extra prediction shown in the table only; the game works without it
+        import lightgbm_model
+        if os.path.exists(lightgbm_model.MODEL_FILE):
+            MODEL["lgb"] = lightgbm_model.LightGBMModel()
+    except Exception as e:
+        print("LightGBM model not loaded:", e)
     print("models loaded:", ", ".join(MODEL))
 
 
@@ -96,6 +102,8 @@ def predict_enroute(g, stops, trip, service_day, now_sec):
 
 
 def predict(g):
+    """Every prediction available right now: {"general", "enroute", "lightgbm", "digitransit"} (None when not available).
+    The game's opponent ("model") is the en-route model when it applies, else the general model."""
     service_day = g["sched_epoch"] - g["sched_sec"]
     now_sec = time.time() - service_day
     try:  # live data: what this stop and this trip have looked like today
@@ -104,17 +112,26 @@ def predict(g):
     except Exception as e:
         print("live data unavailable:", e)
         stops, trip = [], []
+
+    out = {"general": None, "enroute": None, "lightgbm": None, "digitransit": None}
+    if "lgb" in MODEL:
+        try:
+            out["lightgbm"] = MODEL["lgb"].predict(g["route"], g["trip_id"], g["position"], g["sched_sec"])
+        except Exception as e:
+            print("LightGBM model failed:", e)
+    this = next((s for s in stops if s["trip"] == g["trip_id"]), None)
+    if this and this["delay"] is not None:
+        out["digitransit"] = float(this["delay"])   # Digitransit's own realtime estimate
     try:
-        en = predict_enroute(g, stops, trip, service_day, now_sec)
-        if en is not None:
-            return en
+        out["enroute"] = predict_enroute(g, stops, trip, service_day, now_sec)
     except Exception as e:
-        print("enroute model failed, using the general model:", e)
+        print("enroute model failed:", e)
     stop_seen = [(s["left_epoch"] - service_day, s["delay"]) for s in stops
                  if s["route_id"] == g["route_id"] and s["delay"] is not None]
     trip_seen = [(t["left"], t["delay"], t["pos"]) for t in trip if t["realtime"]]
-    return MODEL["m"].predict(g["route"], g["trip_id"], g["stop_id"], g["position"], g["sched_sec"],
-                              g["service_date"], now_sec, stop_seen, trip_seen)
+    out["general"] = MODEL["m"].predict(g["route"], g["trip_id"], g["stop_id"], g["position"], g["sched_sec"],
+                                        g["service_date"], now_sec, stop_seen, trip_seen)
+    return out
 
 
 # ---------- game storage + broadcast ----------
@@ -128,6 +145,11 @@ with gdb() as c:
     c.execute("""CREATE TABLE IF NOT EXISTS guesses (id INTEGER PRIMARY KEY, player TEXT, route TEXT,
         route_id TEXT, stop_id TEXT, stop_name TEXT, trip_id TEXT, service_date TEXT, sched_epoch INTEGER,
         human REAL, model REAL, actual REAL, status TEXT, created INTEGER)""")
+    # Columns added later: every prediction made at guess time, not only the one the player competes against.
+    have = {r[1] for r in c.execute("PRAGMA table_info(guesses)")}
+    for col in ("model_general", "model_enroute", "model_lightgbm", "digitransit"):
+        if col not in have:
+            c.execute(f"ALTER TABLE guesses ADD COLUMN {col} REAL")
 
 
 def broadcast(ev):
@@ -164,7 +186,7 @@ def stop_times(stop_id, date):
     out = []
     for p in gql(STOP_Q, {"s": stop_id, "d": date})["stop"]["stoptimesForServiceDate"]:
         for t in p["stoptimes"]:
-            out.append({"route_id": p["pattern"]["route"]["gtfsId"], "headsign": p["pattern"]["headsign"],
+            out.append({"date": date, "route_id": p["pattern"]["route"]["gtfsId"], "headsign": p["pattern"]["headsign"],
                         "trip": t["trip"]["gtfsId"], "epoch": t["serviceDay"] + t["scheduledDeparture"],
                         "sched_sec": t["scheduledDeparture"], "position": t["stopPositionInPattern"],
                         "left_epoch": t["serviceDay"] + (t["realtimeDeparture"] or t["scheduledDeparture"]),
@@ -187,36 +209,51 @@ def route(rid):
 
 @app.get("/api/timetable")
 def timetable():
-    date = datetime.now(TZ).strftime("%Y%m%d")
-    rows = [t for t in stop_times(request.args["stop"], date) if t["route_id"] == request.args["route"]]
+    """Today's departures plus yesterday's that run after midnight: Digitransit service days last ~30 hours,
+    so night buses after midnight belong to the previous day's service date."""
+    now = datetime.now(TZ)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    today, yesterday = now.strftime("%Y%m%d"), (now - timedelta(days=1)).strftime("%Y%m%d")
+    rows = [t for t in stop_times(request.args["stop"], yesterday) if t["epoch"] >= midnight]
+    rows += stop_times(request.args["stop"], today)
+    rows = sorted((t for t in rows if t["route_id"] == request.args["route"]), key=lambda t: t["epoch"])
     for t in rows:
         t["past"] = t["left_epoch"] <= time.time()
-    return jsonify({"date": date, "now": time.time(), "times": rows})
+    return jsonify({"date": today, "now": time.time(), "times": rows})
 
 
 @app.post("/api/guess")
 def guess():
     g = request.get_json()
-    mdl = predict(g)
+    p = predict(g)
+    model = p["enroute"] if p["enroute"] is not None else p["general"]
     with gdb() as c:
         cur = c.execute("""INSERT INTO guesses (player, route, route_id, stop_id, stop_name, trip_id, service_date,
-            sched_epoch, human, model, status, created) VALUES (?,?,?,?,?,?,?,?,?,?, 'open', ?)""",
+            sched_epoch, human, model, model_general, model_enroute, model_lightgbm, digitransit, status, created)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open', ?)""",
                         (g["player"][:24] or "anon", g["route"], g["route_id"], g["stop_id"], g["stop_name"],
-                         g["trip_id"], g["service_date"], g["sched_epoch"], g["human"], mdl, int(time.time())))
+                         g["trip_id"], g["service_date"], g["sched_epoch"], g["human"], model,
+                         p["general"], p["enroute"], p["lightgbm"], p["digitransit"], int(time.time())))
     broadcast({"type": "guess", "id": cur.lastrowid})
-    return jsonify({"id": cur.lastrowid, "model": mdl})
+    return jsonify({"id": cur.lastrowid, "model": model, **p})
 
 
 @app.get("/api/guesses")
 def guesses():
     with gdb() as c:
         rows = [dict(r) for r in c.execute("SELECT * FROM guesses ORDER BY id DESC LIMIT 40")]
-        done = [dict(r) for r in c.execute("SELECT human, model, actual FROM guesses WHERE status='done'")]
+        done = [dict(r) for r in c.execute("SELECT * FROM guesses WHERE status='done'")]
     n = len(done)
-    mae = lambda k: round(sum(abs(d[k] - d["actual"]) for d in done) / n, 1) if n else None
+
+    def mae(k):  # over the results where this prediction existed
+        errs = [abs(d[k] - d["actual"]) for d in done if d[k] is not None]
+        return {"mae": round(sum(errs) / len(errs), 1), "n": len(errs)} if errs else None
+
     wins = lambda a, b: sum(abs(d[a] - d["actual"]) < abs(d[b] - d["actual"]) for d in done)
-    return jsonify({"rows": rows, "stats": {"resolved": n, "human_mae": mae("human"), "model_mae": mae("model"),
-                                            "human_wins": wins("human", "model"), "model_wins": wins("model", "human")}})
+    return jsonify({"rows": rows, "stats": {
+        "resolved": n, "human_wins": wins("human", "model"), "model_wins": wins("model", "human"),
+        "mae": {k: mae(k) for k in ("human", "model", "model_general", "model_enroute", "model_lightgbm",
+                                    "digitransit")}}})
 
 
 def resolve(g):
@@ -233,6 +270,9 @@ def resolve(g):
     if status == "done":
         broadcast({"type": "result", "id": g["id"], "player": g["player"], "route": g["route"],
                    "stop": g["stop_name"], "time": g["sched_epoch"], "human": g["human"], "model": g["model"],
+                   "model_general": g.get("model_general"), "model_enroute": g.get("model_enroute"),
+                   "model_lightgbm": g.get("model_lightgbm"),
+                   "digitransit": g.get("digitransit"),
                    "actual": actual, "winner": "human" if eh < em else "model" if em < eh else "tie"})
     else:
         broadcast({"type": "guess", "id": g["id"]})

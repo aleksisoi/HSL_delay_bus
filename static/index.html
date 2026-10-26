@@ -1,78 +1,635 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Guess the HSL delay</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<style>
-*{box-sizing:border-box}html,body{height:100%;margin:0;font:14px system-ui,sans-serif;color:#12202b}
-#app{display:grid;grid-template-columns:360px 1fr;height:100%}
-#side{overflow:auto;padding:14px;border-right:1px solid #dbe2e8;background:#f7f9fb}
-#map{height:100%}h1{font-size:18px;margin:0 0 10px}h2{font-size:13px;margin:16px 0 6px;text-transform:uppercase;color:#5d6c78}
-input,button{font:inherit;padding:7px 9px;border:1px solid #dbe2e8;border-radius:7px;background:#fff}
-input[type=text]{width:100%}button{cursor:pointer}button.primary{background:#007ac9;color:#fff;border-color:#007ac9;width:100%;margin-top:8px}
-#tt{max-height:210px;overflow:auto;display:grid;gap:4px}
-.t{display:flex;justify-content:space-between;text-align:left}.t.past{color:#8a97a2;cursor:default}.t.sel{border-color:#007ac9;box-shadow:inset 3px 0 #007ac9}
-.row{padding:7px 0;border-bottom:1px solid #e6ebef;font-size:13px}.win{color:#1fa463;font-weight:600}
-#toast{position:fixed;right:16px;top:16px;z-index:9999;display:grid;gap:8px}
-.toast{background:#12202b;color:#fff;padding:10px 14px;border-radius:8px;max-width:320px;box-shadow:0 4px 16px #0004}
-@media(max-width:700px){#app{grid-template-columns:1fr;grid-template-rows:45% 55%}#map{order:-1}}
-</style></head><body>
-<div id="toast"></div>
-<div id="app"><div id="side">
-<h1>Guess the HSL delay</h1>
-<h2>1. Route</h2><input type="text" id="route" list="routes" placeholder="Bus line, e.g. 55" autocomplete="off"><datalist id="routes"></datalist>
-<h2>2. Stop <span id="stopname" style="text-transform:none"></span></h2><div id="hint">Click a stop on the map.</div>
-<div id="tt"></div>
-<div id="guessbox" hidden><h2>3. Your guess</h2>
-<div id="picked"></div>
-<input type="range" id="g" min="-120" max="900" step="10" value="60" style="width:100%">
-<div><b id="gv">+60 s</b> <span style="color:#5d6c78">(negative = early)</span></div>
-<input type="text" id="player" placeholder="Your name" style="margin-top:8px">
-<button class="primary" id="go">Lock in guess</button></div>
-<h2>Scoreboard</h2><div id="stats"></div><div id="feed"></div>
-</div><div id="map"></div></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="/config.js"></script>
-<script>
-const $=id=>document.getElementById(id), fmt=e=>new Date(e*1000).toLocaleTimeString("fi-FI",{hour:"2-digit",minute:"2-digit"});
-const sgn=s=>(s>0?"+":"")+Math.round(s)+" s";
-const map=L.map("map").setView([60.17,24.94],11);
-const k=window.DIGITRANSIT_KEY;
-L.tileLayer(k?`https://cdn.digitransit.fi/map/v3/hsl-map/{z}/{x}/{y}{r}.png?digitransit-subscription-key=${k}`:"https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",{maxZoom:19,subdomains:"abcd",attribution:"&copy; OpenStreetMap contributors | Digitransit, CARTO"}).addTo(map);
-const layer=L.layerGroup().addTo(map);let RS=[],cur=null,stop=null,tt=null,pick=null,markers={};
-function decode(s){let i=0,la=0,ln=0,o=[];while(i<s.length){let b,sh=0,r=0;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);la+=r&1?~(r>>1):r>>1;sh=0;r=0;do{b=s.charCodeAt(i++)-63;r|=(b&31)<<sh;sh+=5}while(b>=32);ln+=r&1?~(r>>1):r>>1;o.push([la/1e5,ln/1e5])}return o}
-fetch("/api/routes").then(r=>r.json()).then(rs=>{RS=rs;$("routes").innerHTML=rs.map(r=>`<option value="${r.shortName}">${r.longName||""}</option>`).join("")});
-$("player").value=localStorage.player||"";
-$("route").onchange=async e=>{
-  const r=RS.find(x=>x.shortName.toUpperCase()===e.target.value.trim().toUpperCase());if(!r)return;
-  const d=await (await fetch("/api/route/"+encodeURIComponent(r.gtfsId))).json();
-  cur={id:r.gtfsId,name:r.shortName};layer.clearLayers();markers={};stop=null;$("tt").innerHTML="";$("guessbox").hidden=true;$("stopname").textContent="";
-  const all=[];d.patterns.forEach(p=>{const pts=decode(p.patternGeometry.points);all.push(...pts);L.polyline(pts,{color:"#007ac9",weight:5,opacity:.8}).addTo(layer)});
-  const seen={};d.patterns.forEach(p=>p.stops.forEach(s=>{if(seen[s.gtfsId])return;seen[s.gtfsId]=1;
-    markers[s.gtfsId]=L.circleMarker([s.lat,s.lon],{radius:6,color:"#fff",weight:2,fillColor:"#ff6319",fillOpacity:1}).bindTooltip(s.name).on("click",()=>selectStop(s)).addTo(layer)}));
-  map.fitBounds(all);$("hint").textContent="Click a stop on the map."};
-async function selectStop(s){
-  stop=s;$("stopname").textContent="· "+s.name;$("hint").textContent="";
-  Object.entries(markers).forEach(([id,m])=>m.setStyle({fillColor:id===s.gtfsId?"#12202b":"#ff6319",radius:id===s.gtfsId?9:6}));
-  tt=await (await fetch(`/api/timetable?route=${encodeURIComponent(cur.id)}&stop=${encodeURIComponent(s.gtfsId)}`)).json();
-  $("tt").innerHTML="";pick=null;$("guessbox").hidden=true;
-  if(!tt.times.length)$("hint").textContent="No departures from this stop today.";
-  tt.times.forEach(t=>{const b=document.createElement("button");b.className="t"+(t.past?" past":"");
-    b.innerHTML=`<span>${fmt(t.epoch)} ${t.headsign||""}</span><span>${t.past&&t.delay!=null?sgn(t.delay):""}</span>`;
-    if(!t.past)b.onclick=()=>{pick=t;document.querySelectorAll(".t").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");
-      $("picked").textContent=`Route ${cur.name} at ${s.name}, ${fmt(t.epoch)}`;$("guessbox").hidden=false};
-    $("tt").appendChild(b)})}
-$("g").oninput=()=>$("gv").textContent=sgn(+$("g").value);
-$("go").onclick=async()=>{if(!pick)return;localStorage.player=$("player").value;
-  const r=await (await fetch("/api/guess",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-    player:$("player").value||"anon",route:cur.name,route_id:cur.id,stop_id:stop.gtfsId,stop_name:stop.name,trip_id:pick.trip,
-    service_date:tt.date,sched_epoch:pick.epoch,sched_sec:pick.sched_sec,position:pick.position,human:+$("g").value})})).json();
-  toast(`Guess saved. The model guessed ${sgn(r.model)}. You'll be told when the result is in.`)};
-function toast(m){const d=document.createElement("div");d.className="toast";d.textContent=m;$("toast").appendChild(d);setTimeout(()=>d.remove(),9000)}
-async function refresh(){const d=await (await fetch("/api/guesses")).json(),s=d.stats;
-  $("stats").innerHTML=s.resolved?`${s.resolved} results. Avg error: you <b>${s.human_mae} s</b>, model <b>${s.model_mae} s</b>. Wins: you ${s.human_wins}, model ${s.model_wins}`:"No results yet.";
-  $("feed").innerHTML=d.rows.map(r=>`<div class="row"><b>${r.route}</b> ${r.stop_name} ${fmt(r.sched_epoch)} · ${r.player}<br>
-    you ${sgn(r.human)} · model ${sgn(r.model)} · ${r.status==="done"?"actual <b>"+sgn(r.actual)+"</b>":r.status==="expired"?"no result":"waiting"}</div>`).join("")}
-const es=new EventSource("/api/events");
-es.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="result")toast(`Result: ${m.route} at ${m.stop} ${fmt(m.time)} was ${sgn(m.actual)}. ${m.player} guessed ${sgn(m.human)}, model ${sgn(m.model)}. Winner: ${m.winner}.`);refresh()};
-refresh();
-</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guess the HSL delay</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+
+  <style>
+    /* ---------- Base ---------- */
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      font: 14px system-ui, sans-serif;
+      color: #12202b;
+    }
+
+    /* ---------- Layout: sidebar on the left, map on the right ---------- */
+    #app {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      height: 100%;
+    }
+
+    #sidebar {
+      overflow: auto;
+      padding: 14px;
+      border-right: 1px solid #dbe2e8;
+      background: #f7f9fb;
+    }
+
+    #map { height: 100%; }
+
+    /* On phones: map on top, sidebar below */
+    @media (max-width: 700px) {
+      #app {
+        grid-template-columns: 1fr;
+        grid-template-rows: 45% 55%;
+      }
+      #map { order: -1; }
+    }
+
+    /* ---------- Typography ---------- */
+    h1 { font-size: 18px; margin: 0 0 10px; }
+
+    h2 {
+      font-size: 13px;
+      margin: 16px 0 6px;
+      text-transform: uppercase;
+      color: #5d6c78;
+    }
+
+    .muted { color: #5d6c78; }
+    .normal-case { text-transform: none; }
+
+    /* ---------- Form controls ---------- */
+    input, button {
+      font: inherit;
+      padding: 7px 9px;
+      border: 1px solid #dbe2e8;
+      border-radius: 7px;
+      background: #fff;
+    }
+
+    input[type="text"] { width: 100%; }
+    input[type="range"] { width: 100%; }
+    button { cursor: pointer; }
+
+    button.primary {
+      width: 100%;
+      margin-top: 8px;
+      background: #007ac9;
+      border-color: #007ac9;
+      color: #fff;
+    }
+
+    #player-name { margin-top: 8px; }
+
+    /* ---------- Departure list ---------- */
+    #departures {
+      max-height: 210px;
+      overflow: auto;
+      display: grid;
+      gap: 4px;
+    }
+
+    .departure {
+      display: flex;
+      justify-content: space-between;
+      text-align: left;
+    }
+
+    .departure.past {
+      color: #8a97a2;
+      cursor: default;
+    }
+
+    .departure.selected {
+      border-color: #007ac9;
+      box-shadow: inset 3px 0 #007ac9;
+    }
+
+    /* ---------- Scoreboard ---------- */
+    .feed-row {
+      padding: 7px 0;
+      border-bottom: 1px solid #e6ebef;
+      font-size: 13px;
+    }
+
+    /* ---------- Prediction table ---------- */
+    #predictions {
+      width: 100%;
+      margin-top: 6px;
+      border-collapse: collapse;
+    }
+
+    #predictions td {
+      padding: 4px 0;
+      border-bottom: 1px solid #e6ebef;
+    }
+
+    #predictions td:last-child { text-align: right; }
+    #predictions .opponent td { font-weight: 600; }
+
+    /* ---------- Live buses on the map ---------- */
+    .bus-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      background: #1fa463;
+      color: #fff;
+      font: 600 10px system-ui, sans-serif;
+      box-shadow: 0 1px 4px #0006;
+    }
+
+    .bus-icon.dir-2 { background: #8c4799; }
+
+    /* ---------- Toast notifications ---------- */
+    #toasts {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 9999;
+      display: grid;
+      gap: 8px;
+    }
+
+    .toast {
+      max-width: 320px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: #12202b;
+      color: #fff;
+      box-shadow: 0 4px 16px #0004;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="toasts"></div>
+
+  <div id="app">
+    <aside id="sidebar">
+      <h1>Guess the HSL delay</h1>
+
+      <!-- Step 1: pick a route -->
+      <h2>1. Route</h2>
+      <input type="text" id="route-input" list="route-options"
+             placeholder="Bus line, e.g. 55" autocomplete="off">
+      <datalist id="route-options"></datalist>
+
+      <!-- Step 2: pick a stop on the map, then a departure -->
+      <h2>2. Stop <span id="stop-name" class="normal-case"></span></h2>
+      <div id="stop-hint">Pick a route first.</div>
+      <div id="departures"></div>
+
+      <!-- Step 3: make a guess (shown after picking a departure) -->
+      <div id="guess-box" hidden>
+        <h2>3. Your guess</h2>
+        <div id="picked-departure"></div>
+
+        <input type="range" id="guess-slider" min="-120" max="900" step="10" value="60">
+        <div>
+          <b id="guess-value">+60 s</b>
+          <span class="muted">(negative = early)</span>
+        </div>
+
+        <input type="text" id="player-name" placeholder="Your name">
+        <button class="primary" id="submit-guess">Lock in guess</button>
+      </div>
+
+      <!-- Shown after locking in: what every model (and Digitransit) predicted for the same departure -->
+      <div id="prediction-box" hidden>
+        <h2>Predictions</h2>
+        <div id="prediction-title" class="muted"></div>
+        <table id="predictions"></table>
+      </div>
+
+      <!-- Results -->
+      <h2>Scoreboard</h2>
+      <div id="stats"></div>
+      <div id="feed"></div>
+    </aside>
+
+    <div id="map"></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+  <script>
+    // =========================================================
+    //  Helpers
+    // =========================================================
+
+    const $ = (id) => document.getElementById(id);
+
+    /** Unix seconds -> "14:05" (Finnish time format) */
+    function formatTime(epochSeconds) {
+      return new Date(epochSeconds * 1000).toLocaleTimeString("fi-FI", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    }
+
+    /** Seconds -> "+60 s" / "-30 s" / "0 s" */
+    function formatDelay(seconds) {
+      const rounded = Math.round(seconds);
+      return (rounded > 0 ? "+" : "") + rounded + " s";
+    }
+
+    /** Make text safe to put inside innerHTML (player names come from users). */
+    function escapeHtml(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      }[ch]));
+    }
+
+    async function getJson(url, options) {
+      const response = await fetch(url, options);
+      return response.json();
+    }
+
+    /** Show a small message in the top-right corner for 9 seconds. */
+    function showToast(message) {
+      const toast = document.createElement("div");
+      toast.className = "toast";
+      toast.textContent = message;
+      $("toasts").appendChild(toast);
+      setTimeout(() => toast.remove(), 9000);
+    }
+
+    /**
+     * Decode a Google "encoded polyline" string into [[lat, lon], ...].
+     * Digitransit returns route shapes in this format.
+     */
+    function decodePolyline(encoded) {
+      const points = [];
+      let index = 0, lat = 0, lon = 0;
+
+      function nextValue() {
+        let result = 0, shift = 0, byte;
+        do {
+          byte = encoded.charCodeAt(index++) - 63;
+          result |= (byte & 31) << shift;
+          shift += 5;
+        } while (byte >= 32);
+        return (result & 1) ? ~(result >> 1) : (result >> 1);
+      }
+
+      while (index < encoded.length) {
+        lat += nextValue();
+        lon += nextValue();
+        points.push([lat / 1e5, lon / 1e5]);
+      }
+      return points;
+    }
+
+    // =========================================================
+    //  Map (free OpenStreetMap tiles, no API key needed)
+    // =========================================================
+
+    const HELSINKI = [60.17, 24.94];
+    const COLORS = { route: "#007ac9", stop: "#ff6319", selectedStop: "#12202b" };
+
+    const map = L.map("map").setView(HELSINKI, 11);
+
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+
+    const routeLayer = L.layerGroup().addTo(map);
+
+    // =========================================================
+    //  App state
+    // =========================================================
+
+    let allRoutes = [];         // every route from /api/routes
+    let currentRoute = null;    // { id, name }
+    let currentStop = null;     // stop object from the route pattern
+    let timetable = null;       // { date, times: [...] } for the current stop
+    let pickedDeparture = null; // one entry of timetable.times
+    let stopMarkers = {};       // stop gtfsId -> Leaflet marker
+
+    // =========================================================
+    //  Step 1: choose a route
+    // =========================================================
+
+    async function loadRoutes() {
+      allRoutes = await getJson("/api/routes");
+      $("route-options").innerHTML = allRoutes
+        .map((r) => `<option value="${escapeHtml(r.shortName)}">${escapeHtml(r.longName)}</option>`)
+        .join("");
+    }
+
+    function resetStopSelection() {
+      currentStop = null;
+      pickedDeparture = null;
+      $("departures").innerHTML = "";
+      $("guess-box").hidden = true;
+      $("stop-name").textContent = "";
+    }
+
+    async function onRouteChosen(event) {
+      const typed = event.target.value.trim().toUpperCase();
+      const route = allRoutes.find((r) => r.shortName.toUpperCase() === typed);
+      if (!route) return;
+
+      const details = await getJson("/api/route/" + encodeURIComponent(route.gtfsId));
+
+      currentRoute = { id: route.gtfsId, name: route.shortName };
+      routeLayer.clearLayers();
+      stopMarkers = {};
+      resetStopSelection();
+
+      drawRoute(details.patterns);
+      showLiveBuses(route.gtfsId);
+      $("stop-hint").textContent = "Click a stop on the map.";
+    }
+
+    /** Draw every pattern (direction/variant) of the route, plus its stops. */
+    function drawRoute(patterns) {
+      const allPoints = [];
+
+      for (const pattern of patterns) {
+        const points = decodePolyline(pattern.patternGeometry.points);
+        allPoints.push(...points);
+        L.polyline(points, { color: COLORS.route, weight: 5, opacity: 0.8 }).addTo(routeLayer);
+      }
+
+      for (const pattern of patterns) {
+        for (const stop of pattern.stops) {
+          if (stopMarkers[stop.gtfsId]) continue; // same stop shared by several patterns
+
+          stopMarkers[stop.gtfsId] = L.circleMarker([stop.lat, stop.lon], {
+            radius: 6,
+            color: "#fff",
+            weight: 2,
+            fillColor: COLORS.stop,
+            fillOpacity: 1,
+          })
+            .bindTooltip(stop.name)
+            .on("click", () => onStopChosen(stop))
+            .addTo(routeLayer);
+        }
+      }
+
+      map.fitBounds(allPoints);
+    }
+
+    // =========================================================
+    //  Live buses (HSL's open realtime feed, no API key needed)
+    // =========================================================
+
+    const liveLayer = L.layerGroup().addTo(map);
+    let liveClient = null;
+    let liveTopic = null;
+    let liveLine = null;   // e.g. "1055" for route HSL:1055
+    let liveBuses = {};    // vehicle id -> { marker, seen }
+
+    function describeLateness(delay) {
+      if (Math.abs(delay) < 30) return "on time";
+      const minutes = Math.round(Math.abs(delay) / 60 * 10) / 10;
+      return `${minutes} min ${delay > 0 ? "late" : "early"}`;
+    }
+
+    function showLiveBuses(routeGtfsId) {
+      if (!window.mqtt) return;  // library didn't load: the game works without live buses
+      if (!liveClient) {
+        liveClient = mqtt.connect("wss://mqtt.hsl.fi:443/");
+        liveClient.on("message", onLiveMessage);
+        setInterval(removeStaleBuses, 10000);
+      }
+      if (liveTopic) liveClient.unsubscribe(liveTopic);
+      liveLayer.clearLayers();
+      liveBuses = {};
+
+      liveLine = routeGtfsId.replace(/^HSL:/, "");
+      liveTopic = `/hfp/v2/journey/ongoing/vp/bus/+/+/${liveLine}/#`;
+      liveClient.subscribe(liveTopic);
+    }
+
+    /** One position update: /hfp/v2/journey/ongoing/vp/bus/<operator>/<vehicle>/<route>/<dir>/<headsign>/... */
+    function onLiveMessage(topic, payload) {
+      const parts = topic.split("/");
+      if (parts[9] !== liveLine) return;  // a late message from the previously chosen route
+
+      const vp = JSON.parse(payload).VP;
+      if (!vp || vp.lat == null || vp.long == null) return;
+
+      const id = `${vp.oper}/${vp.veh}`;
+      const delay = -vp.dl;  // HFP gives "seconds ahead of schedule"
+      const label = `${vp.desi} → ${parts[11]} · ${describeLateness(delay)}`;
+
+      let bus = liveBuses[id];
+      if (!bus) {
+        const icon = L.divIcon({
+          className: "",
+          html: `<div class="bus-icon dir-${escapeHtml(vp.dir)}" style="width:26px;height:26px">${escapeHtml(vp.desi)}</div>`,
+          iconSize: [26, 26],
+        });
+        bus = liveBuses[id] = { marker: L.marker([vp.lat, vp.long], { icon, zIndexOffset: 1000 }).addTo(liveLayer) };
+        bus.marker.bindTooltip(label);
+      }
+      bus.marker.setLatLng([vp.lat, vp.long]);
+      bus.marker.setTooltipContent(label);
+      bus.seen = Date.now();
+    }
+
+    /** Buses that stop reporting (trip ended) disappear after a minute. */
+    function removeStaleBuses() {
+      for (const [id, bus] of Object.entries(liveBuses)) {
+        if (Date.now() - bus.seen > 60000) {
+          liveLayer.removeLayer(bus.marker);
+          delete liveBuses[id];
+        }
+      }
+    }
+
+    // =========================================================
+    //  Step 2: choose a stop, then a departure
+    // =========================================================
+
+    function highlightStop(selectedId) {
+      for (const [id, marker] of Object.entries(stopMarkers)) {
+        const isSelected = id === selectedId;
+        marker.setStyle({
+          fillColor: isSelected ? COLORS.selectedStop : COLORS.stop,
+          radius: isSelected ? 9 : 6,
+        });
+      }
+    }
+
+    async function onStopChosen(stop) {
+      resetStopSelection();
+      currentStop = stop;
+      $("stop-name").textContent = "· " + stop.name;
+      $("stop-hint").textContent = "Loading departures…";
+      highlightStop(stop.gtfsId);
+
+      const params = new URLSearchParams({ route: currentRoute.id, stop: stop.gtfsId });
+      timetable = await getJson("/api/timetable?" + params);
+
+      $("stop-hint").textContent = timetable.times.length
+        ? "Pick an upcoming departure:"
+        : "No departures from this stop today.";
+
+      for (const departure of timetable.times) {
+        $("departures").appendChild(createDepartureButton(departure));
+      }
+    }
+
+    /** One row in the departure list. Past ones show their actual delay and can't be picked. */
+    function createDepartureButton(departure) {
+      const button = document.createElement("button");
+      button.className = "departure" + (departure.past ? " past" : "");
+
+      const night = departure.date && departure.date !== timetable.date ? " (night)" : "";  // previous day's service
+      const label = `${formatTime(departure.epoch)} ${departure.headsign || ""}${night}`;
+      const delay = departure.past && departure.delay != null ? formatDelay(departure.delay) : "";
+      button.innerHTML = `<span>${escapeHtml(label)}</span><span>${delay}</span>`;
+
+      if (!departure.past) {
+        button.onclick = () => onDepartureChosen(departure, button);
+      }
+      return button;
+    }
+
+    function onDepartureChosen(departure, button) {
+      pickedDeparture = departure;
+
+      document.querySelectorAll(".departure").forEach((b) => b.classList.remove("selected"));
+      button.classList.add("selected");
+
+      $("picked-departure").textContent =
+        `Route ${currentRoute.name} at ${currentStop.name}, ${formatTime(departure.epoch)}`;
+      $("guess-box").hidden = false;
+    }
+
+    // =========================================================
+    //  Step 3: submit a guess
+    // =========================================================
+
+    async function submitGuess() {
+      if (!pickedDeparture) return;
+
+      const playerName = $("player-name").value.trim();
+      localStorage.player = playerName;
+
+      const guess = {
+        player: playerName || "anon",
+        route: currentRoute.name,
+        route_id: currentRoute.id,
+        stop_id: currentStop.gtfsId,
+        stop_name: currentStop.name,
+        trip_id: pickedDeparture.trip,
+        service_date: pickedDeparture.date || timetable.date,  // night buses: the previous day's service
+        sched_epoch: pickedDeparture.epoch,
+        sched_sec: pickedDeparture.sched_sec,
+        position: pickedDeparture.position,
+        human: Number($("guess-slider").value),
+      };
+
+      const response = await getJson("/api/guess", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(guess),
+      });
+
+      showPredictions(guess, response);
+      showToast("Guess saved. You'll be told when the result is in.");
+    }
+
+    /** After locking in: every prediction for this departure, side by side. */
+    function showPredictions(guess, p) {
+      const opponent = p.enroute != null ? "enroute" : "general";
+      const rows = [
+        ["You", guess.human, ""],
+        ["En-route model", p.enroute, "bus not yet within 10 stops", opponent === "enroute"],
+        ["General model", p.general, "", opponent === "general"],
+        ["LightGBM model", p.lightgbm, "not available"],
+        ["Digitransit estimate", p.digitransit, "no realtime estimate yet"],
+      ];
+      $("predictions").innerHTML = rows.map(([name, value, missing, isOpponent]) => `
+        <tr class="${isOpponent ? "opponent" : ""}">
+          <td>${name}${isOpponent ? " (your opponent)" : ""}</td>
+          <td>${value != null ? formatDelay(value) : `<span class="muted">${missing}</span>`}</td>
+        </tr>`).join("");
+      $("prediction-title").textContent =
+        `Route ${guess.route} at ${guess.stop_name}, ${formatTime(guess.sched_epoch)}`;
+      $("prediction-box").hidden = false;
+    }
+
+    // =========================================================
+    //  Scoreboard
+    // =========================================================
+
+    function describeStatus(row) {
+      if (row.status === "done") return `actual <b>${formatDelay(row.actual)}</b>`;
+      if (row.status === "expired") return "no result";
+      return "waiting";
+    }
+
+    /** "you 40 s, model 35 s, ..." for every predictor that has results. */
+    function describeErrors(mae) {
+      const names = { human: "you", model: "model", model_enroute: "en-route", model_general: "general",
+                      model_lightgbm: "LightGBM", digitransit: "Digitransit" };
+      return Object.entries(names)
+        .filter(([key]) => mae[key])
+        .map(([key, name]) => `${name} <b>${mae[key].mae} s</b>` +
+                              (mae[key].n < mae.human.n ? ` <span class="muted">(${mae[key].n})</span>` : ""))
+        .join(", ");
+    }
+
+    /** "model +34 s · Digitransit +30 s" for the predictions a guess has. */
+    function describePredictions(row) {
+      const parts = [`model ${formatDelay(row.model)}`];
+      if (row.digitransit != null) parts.push(`Digitransit ${formatDelay(row.digitransit)}`);
+      return parts.join(" · ");
+    }
+
+    async function refreshScoreboard() {
+      const { stats, rows } = await getJson("/api/guesses");
+
+      $("stats").innerHTML = stats.resolved
+        ? `${stats.resolved} results. Avg error: ${describeErrors(stats.mae)}. ` +
+          `Wins: you ${stats.human_wins}, model ${stats.model_wins}`
+        : "No results yet.";
+
+      $("feed").innerHTML = rows.map((row) => `
+        <div class="feed-row">
+          <b>${escapeHtml(row.route)}</b> ${escapeHtml(row.stop_name)}
+          ${formatTime(row.sched_epoch)} · ${escapeHtml(row.player)}<br>
+          you ${formatDelay(row.human)} · ${describePredictions(row)} · ${describeStatus(row)}
+        </div>`).join("");
+    }
+
+    // Live updates from the server: announce finished results and refresh the board.
+    const events = new EventSource("/api/events");
+    events.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "result") {
+        showToast(
+          `Result: ${message.route} at ${message.stop} ${formatTime(message.time)} ` +
+          `was ${formatDelay(message.actual)}. ` +
+          `${message.player} guessed ${formatDelay(message.human)}, ` +
+          `model ${formatDelay(message.model)}` +
+          (message.digitransit != null ? `, Digitransit ${formatDelay(message.digitransit)}` : "") +
+          `. Winner: ${message.winner}.`
+        );
+      }
+      refreshScoreboard();
+    };
+
+    // =========================================================
+    //  Wire up the page
+    // =========================================================
+
+    $("route-input").onchange = onRouteChosen;
+    $("guess-slider").oninput = () => {
+      $("guess-value").textContent = formatDelay(Number($("guess-slider").value));
+    };
+    $("submit-guess").onclick = submitGuess;
+    $("player-name").value = localStorage.player || "";
+
+    loadRoutes();
+    refreshScoreboard();
+  </script>
+</body>
+</html>
