@@ -2,6 +2,7 @@ https://hsl-delay-game.onrender.com/ to launch the browser game. Due to page lim
 To run locally download game_server.py, static folder with index inside, 2 joblib files which are the models, start with `python game_server.py` (needs `DIGITRANSIT_KEY` in `.env` at the current moment). 
 HSLroutesFINAL.py can be used to query routes, needs DIGITRANSIT_KEY.
 query_route can be used to slice and view data.
+There are also other jupyter notebook files used for EDA.
 Latest dataset is in releases. 
 
 INSTRUCTIONS FOR THE GAME:
